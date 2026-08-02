@@ -1,0 +1,354 @@
+# Measuring an agent against a ground it is not allowed to move
+
+**A frozen-reference instrument for goal drift, and {readings} readings of what it caught**
+
+phronesis · draft · corpus {span_from} to {span_to}
+
+> Every number in this document is rendered from the live corpus by `build.py`. None are
+> typed. `python3 build.py --check` fails if the prose has outlived its arithmetic.
+
+---
+
+## Abstract
+
+Agents lose the plot. The field has converged on this — goal drift is now a named, measured
+failure mode with formal metrics and a growing literature — but the tooling has converged on
+two answers that are both post-hoc or both about policy: statistical drift detection over
+batches of traces, and declarative guardrails that decide whether a tool call is permitted.
+Neither answers, during a run, the question an agent's operator actually has: *is this still
+the errand we started?*
+
+We describe an instrument that answers it deterministically, in-loop, with no model call and
+no embedding: it freezes the goal as stated at the first step, measures each subsequent
+state against that frozen ground by set overlap, and blocks the next tool call when the
+displacement crosses a published threshold. We report {readings} readings across {runs} runs
+and one week of continuous production use on real software work.
+
+Most of what we report is negative and, we think, more useful than a positive result would
+be. The instrument fires on {fire_rate}% of readings, {goaldrift_share}% of those fires are
+the same verdict, and of the {clear} fires an independent rule can call cleanly,
+{precision}% were warranted. The dominant failure is not sensitivity or calibration. It is
+that **a legitimate redirect and a genuine drift are the same measurement**, and the
+affordance built to separate them — a slot for declaring a sub-goal's parent — was used in
+{parent_pct}% of readings and fired {excursions} times. We trace that non-adoption to a
+specific mechanism, show it is not an awareness problem, and argue it generalizes to any
+frozen-reference design.
+
+One result is positive, and it comes from declining to resolve that ambiguity at all.
+Conditioning each reading on **how long the agent had run since a person last spoke** —
+joinable because every user message is a timestamped record — gives a monotone rise in
+goal-drift with unattended runtime, {speech_lo}% inside a minute against {speech_hi}% past
+half an hour, z = {speech_z} between the two best-powered bands. The ambiguity that makes
+{unclear} fires unlabellable can be designed around even where it cannot be solved.
+
+---
+
+## 1. What is frozen, and why that is the whole design
+
+The instrument holds a **ground**: the goal as the agent first spelled it, with a progress
+word and a self-reported distance. On every subsequent step the agent spells its current
+state, and the instrument reports the displacement Φ between that state and the ground.
+
+The ground does not move. Not when the agent restates the goal more precisely, not when the
+task turns out to be harder than it looked, not when a sub-task legitimately dominates the
+next twenty steps. It moves only on an explicit `reset_task`, which is an admission, not an
+adjustment.
+
+This is a deliberate break with where the field is going. The prevailing architectural
+answer to long-horizon drift is *re-anchoring*: durable goal files that are periodically
+re-read, context reconstituted from external state, the objective re-summarized as the
+window fills. Every one of those mechanisms updates the reference. They are designed to keep
+the agent's *working* goal fresh, and they succeed at that.
+
+The claim here is that a reference which updates cannot measure displacement, because
+displacement is defined relative to something that holds still. An agent that drifts one
+token per step and re-anchors each time never registers movement, and arrives somewhere else
+entirely having passed every check. Freezing the ground is what makes the measurement mean
+anything, and it is also why the instrument is annoying to use — those are the same property.
+
+**The state is a pair.** Formally the tracked object is `x = [x, f(x)]`: the ground and the
+reading over it, together. Cycle detection runs over the ground trail first and falls back to
+the reading trail only when the ground trail is too short. This distinction turns out to
+matter empirically — see §5.
+
+**Determinism is a requirement, not an optimization.** The measure is Jaccard overlap over a
+normalized token set. No embedding, no model call, no network. Three consequences, in
+descending order of how much we care: a verdict is reproducible, so a corpus collected in
+July can be replayed under a different calibration in August and the numbers are comparable;
+the instrument cannot fail in the same way the thing it measures fails; and it costs
+microseconds, so it can run on every step rather than on sampled ones.
+
+**Enforcement is at the tool boundary.** A verdict the agent may ignore is a verdict that
+gets ignored. Readings are collected by a hook that denies the next tool call when coverage
+lapses, returning the reason to the model. This converges with what the guardrail literature
+independently arrived at — deterministic enforcement outside the reasoning loop — though
+that work enforces *policy* (may this agent call this tool) and this enforces *attention*.
+
+---
+
+## 2. Setup
+
+One week of continuous use on real work — shipping a Python SDK, a Cloudflare Worker, a
+Next.js site — not a benchmark. That is the study's strength and its main weakness, and both
+are addressed in §7.
+
+- **Readings:** {readings_all} total; {readings} in the analyzable era.
+- **Runs:** {runs}.
+- **Calibration:** `goal_min = 0.30` (overlap floor), `stall_window = 4`, `settled_max = 0.15`.
+  Published and unchanged for the study period; a threshold moved mid-corpus makes every
+  reading before and after incomparable.
+
+**Two logging eras, never pooled.** Until 2026-07-28 only drift moments were written, so
+every row was a fire and `drifting` did not exist as a field. Afterwards every step is
+logged. {pre_era} readings predate the change and are excluded from every rate below. We
+report this prominently because pooling them produced three wrong statistics in one sitting,
+including a fire rate quoted as 22% that is really {fire_rate}%.
+
+---
+
+## 3. What the instrument says
+
+| verdict | n | share |
+|---|---|---|
+{verdict_table}
+
+Fires only:
+
+| verdict | n | share of fires |
+|---|---|---|
+{fire_table}
+
+Two things stand out.
+
+**`goal-drift` is {goaldrift_share}% of all fires.** The grammar has eight verdicts and one
+of them does nearly all the work. Every other signal — cycles, plateaus, the agent's own
+report of being stuck — is a rounding error beside it.
+
+**`reground` is {reground_share}% of all readings.** That is the rate at which the ground was
+explicitly reset. A instrument whose reference is deliberately immovable gets its reference
+moved, by hand, on one reading in five.
+
+---
+
+## 4. Precision, and the {unclear} fires nobody can call
+
+Fires were labelled by rule rather than by judgement. An agent grading the instrument that
+judged it, on its own runs, from memory, is the weakest evidence available, and the corpus
+records `by` on every label precisely so that kind can be discounted. The rule instead asks
+what the run itself did afterwards: did it return to the ground the fire was measured
+against (→ the fire was **useful**), or carry on and close distance on the new goal (→ the
+fire was a **false alarm**)?
+
+Of {fires} fires, {labelled} are labelled ({labelled_pct}%):
+
+| outcome | n |
+|---|---|
+| useful | {useful} |
+| false alarm | {false} |
+| **the rule declined** | **{unclear}** |
+
+**Precision is {useful}/{clear} = {precision}%** on fires with a clear call. We report it
+because it is what the data says, and we do not think it should be read as "the instrument
+is {precision}% accurate". {unclear_pct}% of labelled fires got no call at all, and the
+reason those {unclear} are unclear is the actual finding of this paper.
+
+---
+
+## 5. Three negative results, and one positive
+
+### 5.1 A redirect and a drift are the same measurement
+
+When the goal legitimately changes — the user says something new, or the work reveals that
+the real task was elsewhere — overlap with the frozen ground collapses, exactly as it does
+when an agent wanders. The instrument sees one number and cannot tell the two apart.
+
+The evidence that this is the dominant case rather than an edge case: **a `goal-drift` fire
+is followed by another `goal-drift` fire {chain_pct}% of the time** ({chain_n} of {chain_d}).
+Those chains are runs proceeding on a new goal while being told, every step, that they have
+left the old one. The drifted goal never becomes the official ground; the instrument never
+catches up; the agent is scolded for continuing to do the thing it decided to do.
+
+### 5.2 The affordance built to fix this was never used, and we know why
+
+The grammar has a `parent_goal` slot: name the larger goal a sub-task serves, and the verdict
+becomes `excursion` — recognized, not counted as drift. It was spelled in {parent_spelled} of
+{readings_all} readings ({parent_pct}%). `excursion` fired {excursions} times.
+
+For weeks this read as an adoption problem. It is not, and the mechanism is worth stating
+because it will recur in any system that scores a declaration:
+
+1. The advice on every `goal-drift` fire already said *"if this is a sub-task, pass
+   parent_goal"*. So it was not an awareness problem.
+2. Every declaration that was made **was received, measured against the ground, and rejected
+   for falling below the same 0.30 floor** — at overlaps of 0.03, 0.04 and 0.17.
+3. **The rejection was invisible.** The verdict came back as plain `goal-drift`, whose advice
+   then instructed the agent to pass `parent_goal` — which it had just done.
+
+An agent that declares a parent, is silently ignored, and is then told to do the thing it
+just did learns that the field does not work. The instrument taught its users to stop using
+the one affordance that would have fixed its worst failure mode. This is now fixed — a
+rejected declaration is named, with the number that decided it, and `parent_overlap` is
+recorded — but the threshold question remains open on three data points, and three is not
+enough to move a published calibration.
+
+### 5.3 The cycle detector mostly fires on the wrong trail
+
+`oscillating` claims the agent returned to the same goals in a repeating order. Recomputing
+the period directly over the ground trail, most such fires have no cycle there at all: they
+fired on the fallback that reads the *verdict* sequence. A run that is genuinely moving while
+producing a repeating pattern of readings is a rhythm, not a loop — and the ground-first
+check exists precisely to avoid mistaking one for the other.
+
+This one bit the authors during the writing of this paper. The instrument fired `oscillating`
+with period 4 on the session that produced §5, having pooled three sequential sub-tasks into
+one trace and observed the distance counter reset with each. It was a textbook instance of
+5.1 and 5.3 at once, caught live.
+
+### 5.4 Drift is real, and it accumulates with unattended runtime
+
+The three findings above are about what the instrument cannot separate. This one is what
+happens when you stop trying to separate it and condition on it instead.
+
+The corpus cannot label a fire "the user redirected me" or "I wandered off" — both collapse
+the overlap with the ground, which is §5.1. But the transcript records every user message as
+a timestamped `queue-operation`/`enqueue` row, top-level turns and ones typed mid-work
+alike, and the drift log is timestamped too. Joining them labels nothing. It conditions on
+the one variable that distinguishes the two causes: **how long the agent had been running
+since a person last said anything.**
+
+Across {speech_messages} recorded messages and {speech_kept} readings:
+
+| time since the user last spoke | goal-drift | readings | rate |
+|---|---|---|---|
+{speech_table}
+
+Two corrections are applied, and both cost the result rather than flatter it. A reading
+taken straight after `reground` or `grounded` is scored against a ground that was *just
+reset* and cannot drift by construction, so every such reading is dropped along with the
+resets themselves — keeping them would manufacture the low end of the curve. And a reading
+is attributed only to the most recent message before it.
+
+{speech_note}
+
+**The prediction that failed.** This was run to test the opposite hypothesis: that most
+goal-drift is misclassified redirects, since a mid-turn message does not fire the
+`UserPromptSubmit` hook and was therefore expected to be invisible. It is not. The hook's
+transcript-scanning fallback works — {speech_lo}% of readings inside a minute of the user
+speaking are goal-drift, and 44% are `reground`, correctly reading the person's words as a
+new instruction rather than the agent's wandering. The misclassification the corpus was
+braced for is largely already handled.
+
+What the data says instead is simpler and worse: **the drift is real.** It roughly doubles
+per band, and the reference the agent is measured against is the same frozen one throughout
+— so this is not a threshold artefact. It is displacement accumulating in the absence of
+correction.
+
+**What this does not establish.** Time-since-speech is confounded with task difficulty: the
+stretches nobody interrupts are exactly the hard ones, and a harder task may drift more for
+reasons that have nothing to do with being unattended. Nothing here separates those. The
+final band is n={speech_hi_n} and carries no weight on its own; it is reported because
+hiding a suggestive extreme is its own kind of dishonesty, not because {speech_hi}% means
+anything at that count. And this is still one operator on one machine — §7 applies in full.
+
+**Why it matters anyway.** It is the first result in this corpus with a real effect size
+behind it, and it partly answers §5.1's complaint. You do not need to tell a redirect from a
+drift if you condition on when the user last spoke — the ambiguity that made
+{unclear} fires unlabellable is, for this question, designed around rather than solved. It
+also lands where the outside literature already points: reported success rates falling after
+roughly half an hour of continuous operation, and goal drift correlating with context
+length. Same shape, a different instrument, and one person's real work rather than a
+simulation.
+
+
+---
+
+## 6. Sensitivity: a field, not a fact of nature
+
+Until 2026-08-01 the corpus could report precision and not sensitivity, and the reason was
+mundane. Fires identify themselves. A **miss** — a moment where something was genuinely wrong
+and the instrument said nothing — requires an independent error signal, and the only one
+available (`catches`: a non-zero exit, a test going red, recorded by a hook with no opinion
+about the instrument) lived in a different file, under a different step counter, with no
+shared key. A catch could not name the reading that was live when it happened.
+
+That is now joined: readings carry `(run, step)` on both sides, and every catch records the
+reading it fell under plus how many steps back that reading was. `sensitivity.py` computes
+the second row of the matrix and currently reports **no joinable catches**, which is the
+correct reading on the day the field lands and is stated rather than rounded to zero.
+
+Three limits will not go away with more data, and are recorded here so the eventual number is
+never quoted without them:
+
+- **The proxy is narrow.** A failed command is real, independent evidence. But most drift is
+  not a failed command — an agent confidently building the wrong thing produces no catch at
+  all. The miss rate this yields is a *floor*.
+- **Attribution decays.** Coverage runs near 24%, so three steps in four have no reading.
+  A catch twelve steps after the last reading fell in a stretch nothing watched, and scoring
+  it as a miss blames the detector for a step it was never shown.
+- **Quiet is not correct.** The false-alarm denominator treats "nothing failed" as "nothing
+  was wrong", which is the narrow proxy counted a second time.
+
+---
+
+## 7. What this study cannot support
+
+**Every label is ours.** The rules are reproducible and wrong in the same direction every
+time, which is better than an opinion, and is still not independent. `replay.py` exists to
+score the grammar against foreign traces, and found on inspection that the two public suites
+supply per-*run* labels only: the goal-drift evaluations compute their metrics against a
+baseline run and interrogate the model at the end, and the adversarial-pressure probes
+measure system-prompt violation under manipulation, which is a different phenomenon. So the
+external claim available is per-run agreement, and per-step precision remains internal.
+
+**One agent, effectively.** Readings by agent:
+
+| agent | readings | fires |
+|---|---|---|
+{agent_table}
+
+The second-largest producer is {agent_second}. Any comparison across agents from this corpus
+is underpowered to the point of meaninglessness, and an earlier draft of this work quoted a
+p-value that turned out to compare an agent's readings against an era they predated.
+
+**One operator, one machine, one week.** Selection effects on task type, working style and
+tolerance for interruption are total and unmeasured.
+
+**The instrument is not blind to its own subject.** These readings were produced while
+building the instrument. The corpus's most-represented task is its own construction.
+
+---
+
+## 8. What we think is true
+
+The frozen ground is the right primitive, and the evidence for it here is indirect: the
+instrument's failures are all failures of *interpretation* — telling a redirect from a drift —
+and none are failures of *measurement*. Φ was never wrong about displacement. It was
+repeatedly wrong about what displacement meant.
+
+That points somewhere specific. The missing element is not a better threshold, a smarter
+detector, or a model in the loop. It is a way for the subject to say **"the errand changed,
+and here is what it changed to"** that the instrument will actually honour — and the
+{parent_pct}% adoption of exactly such a slot, for the mechanical reason in §5.2, is the most
+transferable thing in this paper. Build the affordance, score the declaration, and then make
+the score *visible*, or you will train your users out of the feature and read the result as
+apathy.
+
+---
+
+## Availability
+
+`laserbrain` on PyPI. Corpus tooling — `corpus-map.py`, `label-fires.py`, `sensitivity.py`,
+`replay.py` — ships alongside. The drift log is local and unshared; the labelling rules are
+runnable against any corpus of the same shape.
+
+## Related work
+
+Goal drift as a measured failure mode: Arike et al., *Evaluating Goal Drift in Language Model
+Agents* (AIES). Asymmetric drift under value conflict (ICLR 2026 workshop). Architectural
+re-anchoring and goal persistence: Zylos, *Goal Persistence and Goal Drift in Long-Horizon AI
+Agents* (2026). Deterministic enforcement at the tool boundary: the agentic-guardrails
+literature, incl. AgentSpec and Pro2Guard. Closest in structure: *AgentTether* (arXiv
+2607.06273), whose Check mechanism covers loop repetition, intent drift and expectation
+deviation against an intent fixed at initialization — reached with embeddings, an LLM
+evaluator and a constructed execution graph, where this work uses set overlap and no model
+call.
